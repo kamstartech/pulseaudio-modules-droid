@@ -85,7 +85,8 @@ PA_MODULE_USAGE(
         "config=<location for droid audio configuration> "
         "voice_property_key=<proplist key searched for sink-input that should control voice call volume> "
         "voice_property_value=<proplist value for the key for voice control sink-input> "
-        "voice_virtual_stream=<true/false> create virtual stream for voice call volume control (default true)"
+        "voice_virtual_stream=<true/false> create virtual stream for voice call volume control (default true) "
+        "voice_vsid=<VSID (decimal) to send to QCOM HAL for voice call start/stop, e.g. 297816064 for VOICEMMODE1> "
         "options=<comma separated list of options to enable/disable>"
 );
 
@@ -113,6 +114,7 @@ static const char* const valid_modargs[] = {
     "voice_property_key",
     "voice_property_value",
     "voice_virtual_stream",
+    "voice_vsid",
     /* DM_OPTIONS */
     NULL,
 };
@@ -161,6 +163,8 @@ struct userdata {
 
     pa_modargs *modargs;
     pa_card *card;
+
+    uint32_t voice_vsid;
 };
 
 struct profile_data {
@@ -171,8 +175,6 @@ struct profile_data {
     /* Variables for virtual profiles: */
     struct virtual_profile virtual;
 };
-
-#ifdef DROID_AUDIO_HAL_DEBUG_VSID
 
 /* From hal/voice_extn/voice_extn.c */
 #define AUDIO_PARAMETER_KEY_VSID            "vsid"
@@ -191,6 +193,8 @@ struct profile_data {
 #define CALL_INACTIVE       (BASE_CALL_STATE)
 #define CALL_ACTIVE         (BASE_CALL_STATE + 1)
 #define VOICE_VSID  0x10C01000
+
+#ifdef DROID_AUDIO_HAL_DEBUG_VSID
 
 /* For virtual profiles */
 #define VOICE_SESSION_VOICE1_PROFILE_NAME       "voicecall-voice1"
@@ -483,11 +487,31 @@ static bool voicecall_profile_event_cb(struct userdata *u, pa_droid_profile *p, 
 
         if (pa_droid_option(u->hw_module, DM_OPTION_REALCALL))
             pa_droid_set_parameters(u->hw_module, VENDOR_EXT_REALCALL_ON);
+
+        /* Send VSID to start voice path on QCOM devices (e.g. SDM845).
+         * set_mode(AUDIO_MODE_IN_CALL) alone does not call voice_start_call()
+         * in the CAF HAL — it requires a vsid+call_state set_parameters call.
+         * VOICEMMODE1_VSID covers SIM1 CS and IMS calls on SDM845. */
+        if (u->voice_vsid != 0) {
+            char *setparam = pa_sprintf_malloc("%s=%u;%s=%d",
+                                               AUDIO_PARAMETER_KEY_VSID, u->voice_vsid,
+                                               AUDIO_PARAMETER_KEY_CALL_STATE, CALL_ACTIVE);
+            pa_droid_set_parameters(u->hw_module, setparam);
+            pa_xfree(setparam);
+        }
     } else {
         pa_droid_sink_set_voice_control(am_output->sink, false);
 
         if (pa_droid_option(u->hw_module, DM_OPTION_REALCALL))
             pa_droid_set_parameters(u->hw_module, VENDOR_EXT_REALCALL_OFF);
+
+        if (u->voice_vsid != 0) {
+            char *setparam = pa_sprintf_malloc("%s=%u;%s=%d",
+                                               AUDIO_PARAMETER_KEY_VSID, u->voice_vsid,
+                                               AUDIO_PARAMETER_KEY_CALL_STATE, CALL_INACTIVE);
+            pa_droid_set_parameters(u->hw_module, setparam);
+            pa_xfree(setparam);
+        }
     }
 
     return true;
@@ -864,6 +888,21 @@ int pa__init(pa_module *m) {
     u = pa_xnew0(struct userdata, 1);
     u->core = m->core;
     m->userdata = u;
+    u->voice_vsid = 0;
+
+    {
+        const char *vsid_str = pa_modargs_get_value(ma, "voice_vsid", NULL);
+        if (vsid_str) {
+            char *endptr;
+            unsigned long v = strtoul(vsid_str, &endptr, 0);
+            if (*endptr != '\0' || endptr == vsid_str) {
+                pa_log("Failed to parse voice_vsid argument.");
+                goto fail;
+            }
+            u->voice_vsid = (uint32_t)v;
+            pa_log_info("Voice VSID set to 0x%08X (%u)", u->voice_vsid, u->voice_vsid);
+        }
+    }
 
     module_id = pa_modargs_get_value(ma, "module_id", DEFAULT_MODULE_ID);
 
