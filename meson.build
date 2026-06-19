@@ -9,7 +9,7 @@ cc = meson.get_compiler('c')
 configinc = include_directories('.')
 libdir = join_paths(get_option('prefix'), get_option('libdir'))
 
-pa_c_args = ['-DHAVE_CONFIG_H']
+pa_c_args = ['-DHAVE_CONFIG_H', '-DHYBRIS_BUILD']
 
 droiddevice = get_option('droid-device')
 pa_c_args += ['-DDROID_DEVICE_@0@=1'.format(droiddevice.underscorify().to_upper())]
